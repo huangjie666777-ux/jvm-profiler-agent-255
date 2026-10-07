@@ -17,12 +17,4 @@ final class StatsCell {
         return new MethodStats(completedCount, exceptionCount, totalInclusiveNanos,
                 totalSelfNanos, maxInclusiveNanos);
     }
-
-    void reset() {
-        completedCount = 0L;
-        exceptionCount = 0L;
-        totalInclusiveNanos = 0L;
-        totalSelfNanos = 0L;
-        maxInclusiveNanos = 0L;
-    }
 }

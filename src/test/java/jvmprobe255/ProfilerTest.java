@@ -11,6 +11,7 @@ import java.util.concurrent.atomic.AtomicReference;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -213,6 +214,10 @@ class ProfilerTest {
 
         assertThrows(IllegalArgumentException.class,
                 () -> profiler.transform(new byte[]{1, 2, 3}, getClass().getClassLoader()));
+        byte[] badMagic = new byte[100];
+        badMagic[0] = 1;
+        assertThrows(IllegalArgumentException.class,
+                () -> profiler.transform(badMagic, getClass().getClassLoader()));
     }
 
     @Test
@@ -220,6 +225,26 @@ class ProfilerTest {
         Profiler profiler = new Profiler();
         byte[] sdkBytes = readResource("jvmprobe255/Profiler.class");
         assertSame(sdkBytes, profiler.transform(sdkBytes, Profiler.class.getClassLoader()));
+    }
+
+    @Test
+    void successfulClearDropsAllOldCounters() throws Exception {
+        Object demo = newDemo();
+        demoClass.getMethod("factorial", int.class).invoke(demo, 4);
+        assertNotNull(stats(demoClass, "factorial", desc(long.class, int.class)));
+
+        assertEquals(0, Profiler.inFlightCount());
+        assertTrue(Profiler.clear());
+        // A later snapshot must be a clean registry: no reset-but-present old entries.
+        assertTrue(Profiler.snapshot().stats().isEmpty());
+
+        demoClass.getMethod("mutualEven", int.class).invoke(demo, 2);
+        Snapshot snapshot = Profiler.snapshot();
+        assertEquals(2L,
+                snapshot.get(demoClass.getName().replace('.', '/'), "mutualEven",
+                        desc(int.class, int.class)).completedCount());
+        assertNull(snapshot.get(demoClass.getName().replace('.', '/'), "factorial",
+                desc(long.class, int.class)));
     }
 
     private static byte[] readResource(String resource) {

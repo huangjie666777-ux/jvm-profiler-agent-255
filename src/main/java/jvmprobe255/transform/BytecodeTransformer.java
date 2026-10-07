@@ -25,6 +25,7 @@ import org.objectweb.asm.tree.VarInsnNode;
 public final class BytecodeTransformer {
 
     private static final int ASM_API = Opcodes.ASM9;
+    private static final int CLASS_MAGIC = 0xCAFEBABE;
     private static final int JAVA17_MAJOR = Opcodes.V17 & 0xFFFF;
     private static final String SDK_PACKAGE = "jvmprobe255/";
     private static final String RUNTIME_GUARD = "jvmprobe255/runtime/ExitGuard";
@@ -34,6 +35,9 @@ public final class BytecodeTransformer {
     public byte[] transform(byte[] classBytes, ClassLoader loader) {
         if (classBytes == null || classBytes.length == 0) {
             throw new IllegalArgumentException("null or empty class bytes");
+        }
+        if (!hasClassMagic(classBytes)) {
+            throw new IllegalArgumentException("invalid class file: bad magic number");
         }
         ClassReader reader;
         ClassNode clazz = new ClassNode(ASM_API);
@@ -80,6 +84,17 @@ public final class BytecodeTransformer {
                     + clazz.name + ": " + e.getMessage(), e);
         }
         return writer.toByteArray();
+    }
+
+    private static boolean hasClassMagic(byte[] bytes) {
+        if (bytes.length < 4) {
+            return false;
+        }
+        int magic = (bytes[0] & 0xFF) << 24
+                | (bytes[1] & 0xFF) << 16
+                | (bytes[2] & 0xFF) << 8
+                | bytes[3] & 0xFF;
+        return magic == CLASS_MAGIC;
     }
 
     private static void validateClass(ClassNode clazz) {

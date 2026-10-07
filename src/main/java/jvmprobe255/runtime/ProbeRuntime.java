@@ -10,7 +10,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
-import java.util.concurrent.locks.ReentrantLock;
+import java.util.concurrent.locks.ReentrantReadWriteLock;
 
 /**
  * Runtime registry entered by instrumented bytecode.
@@ -27,8 +27,14 @@ public final class ProbeRuntime {
     private static final ConcurrentHashMap<Long, Stack> STACKS = new ConcurrentHashMap<>();
     /** Number of in-flight calls across all threads. */
     private static final AtomicLong IN_FLIGHT = new AtomicLong();
-    /** Serializes structural registry changes (cell creation/clear) against snapshots. */
-    private static final ReentrantLock STRUCTURE_LOCK = new ReentrantLock();
+    /**
+     * Single concurrency protocol for the whole registry: completed-count
+     * publication (enter/exit) takes the read side, while snapshot/clear take
+     * the write side. A snapshot therefore corresponds to one consistent
+     * instant, and clear can only observe quiescence when no enter/exit region
+     * is active, so old counters can never bleed into post-clear state.
+     */
+    private static final ReentrantReadWriteLock PROTOCOL_LOCK = new ReentrantReadWriteLock();
 
     private static final class Stack {
         Frame top;
@@ -43,6 +49,7 @@ public final class ProbeRuntime {
      * All bookkeeping failures are contained here and never propagate to business code.
      */
     public static long enter(String className, String methodName, String descriptor) {
+        PROTOCOL_LOCK.readLock().lock();
         try {
             MethodKey key = new MethodKey(className, methodName, descriptor);
             StatsCell cell = resolveCell(key);
@@ -56,20 +63,13 @@ public final class ProbeRuntime {
             return token;
         } catch (Throwable t) {
             return 0L;
+        } finally {
+            PROTOCOL_LOCK.readLock().unlock();
         }
     }
 
     private static StatsCell resolveCell(MethodKey key) {
-        StatsCell existing = CELLS.get(key);
-        if (existing != null) {
-            return existing;
-        }
-        STRUCTURE_LOCK.lock();
-        try {
-            return CELLS.computeIfAbsent(key, k -> new StatsCell());
-        } finally {
-            STRUCTURE_LOCK.unlock();
-        }
+        return CELLS.computeIfAbsent(key, k -> new StatsCell());
     }
 
     /**
@@ -80,6 +80,15 @@ public final class ProbeRuntime {
      * @param exceptional whether the method exits with an escaping throwable
      */
     public static void exit(long token, boolean exceptional) {
+        PROTOCOL_LOCK.readLock().lock();
+        try {
+            doExit(token, exceptional);
+        } finally {
+            PROTOCOL_LOCK.readLock().unlock();
+        }
+    }
+
+    private static void doExit(long token, boolean exceptional) {
         long threadId = Thread.currentThread().getId();
         Stack stack = STACKS.get(threadId);
         if (stack == null || stack.top == null) {
@@ -122,7 +131,7 @@ public final class ProbeRuntime {
     }
 
     public static Snapshot snapshot() {
-        STRUCTURE_LOCK.lock();
+        PROTOCOL_LOCK.writeLock().lock();
         try {
             Map<MethodKey, MethodStats> result = new LinkedHashMap<>();
             for (Map.Entry<MethodKey, StatsCell> entry : CELLS.entrySet()) {
@@ -133,7 +142,7 @@ public final class ProbeRuntime {
             }
             return new Snapshot(result);
         } finally {
-            STRUCTURE_LOCK.unlock();
+            PROTOCOL_LOCK.writeLock().unlock();
         }
     }
 
@@ -143,19 +152,15 @@ public final class ProbeRuntime {
      * @return {@code true} when cleared; {@code false} if calls are currently active
      */
     public static boolean clear() {
-        STRUCTURE_LOCK.lock();
+        PROTOCOL_LOCK.writeLock().lock();
         try {
             if (IN_FLIGHT.get() != 0L) {
                 return false;
             }
-            for (StatsCell cell : CELLS.values()) {
-                synchronized (cell) {
-                    cell.reset();
-                }
-            }
+            CELLS.clear();
             return true;
         } finally {
-            STRUCTURE_LOCK.unlock();
+            PROTOCOL_LOCK.writeLock().unlock();
         }
     }
 
