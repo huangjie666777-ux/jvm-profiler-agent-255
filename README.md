@@ -10,8 +10,26 @@
 - `runtime/ProbeRuntime`：每线程独立调用栈（ThreadLocal 语义的并发注册表）、递归/相互调用逐层结算、并发聚合与一致快照。
 - `runtime/Frame`、`runtime/StatsCell`：在途调用栈帧与每方法计数单元。
 - `MethodKey` / `MethodStats` / `Snapshot`：按“内部类名 + 方法名 + JVM 描述符”的不可变标识、统计值与快照。
+- `agent/ProbeAgent`、`AgentConfig`、`AgentClassFileTransformer`、`ReportWriter`：启动期 Java Agent。`premain` 解析参数并注册 `ClassFileTransformer`，复用同一套转换与计时；正常退出时写 UTF-8 JSON 报告。
 
 ## 接入方式
+
+### 方式一：Java Agent（推荐，零业务改动）
+
+`mvn package` 产出 `target/jvmprobe255-0.1.0-agent.jar`（内含 ASM 依赖、声明 `Premain-Class` 的独立 agent JAR）。只给启动命令加 `-javaagent` 即可采集，无需改业务源码、无需业务调用 `transform`、无需自定义 ClassLoader：
+
+```bash
+java -javaagent:target/jvmprobe255-0.1.0-agent.jar=include=com.example,report=probe.json -jar app.jar
+# 可选排除包前缀（分号分隔多个），排除优先于包含：
+java -javaagent:target/jvmprobe255-0.1.0-agent.jar=include=com.example,exclude=com.example.legacy;com.example.gen,report=probe.json -cp app.jar com.example.Main
+```
+
+- 参数为逗号分隔的 `key=value`：`include=<应用包前缀>`（必填）、`report=<报告路径>`（必填）、`exclude=<前缀;前缀>`（可选）。按包边界匹配：`com.example` 命中 `com.example` 及其子包，不会误伤 `com.example2`。非法参数在 `main` 执行前以 `IllegalArgumentException` 中止 JVM。
+- 仅支持**系统类加载器加载的普通 classpath 应用**；不做动态 attach、不做重转换、不支持命名模块。JDK、ASM 与 SDK 自身的类始终跳过。
+- 某个类转换失败时保留原字节、向 stderr 报告类名与原因，其余类继续采集。
+- 正常 JVM 退出时由 shutdown hook 写出 UTF-8 JSON 报告，每条含 `className`、`methodName`、`descriptor` 及全部完成统计（`completedCount`、`exceptionCount`、`totalInclusiveNanos`、`totalSelfNanos`、`maxInclusiveNanos`）；退出时仍在途的调用不算完成，只计入 `inFlightAtShutdown`。报告写盘失败会向 stderr 明确报错。
+
+### 方式二：手动转换（SDK 门面）
 
 ```java
 import jvmprobe255.Profiler;
@@ -74,3 +92,13 @@ java -cp "$CP" demo255.DemoMain
 ```
 
 运行时 SDK 类必须由业务类可见的同一套 ClassLoader 加载（通常让转换类加载器的父加载器加载 `jvmprobe255`），否则插桩字节中的 `invokestatic` 无法链接到运行时。
+
+Agent 演示（示例应用 `demo255.AgentDemoMain` 完全不引用 SDK，`demo255.excluded` 包被排除）：
+
+```bash
+mvn package
+java -Xverify:all \
+  -javaagent:target/jvmprobe255-0.1.0-agent.jar=include=demo255,exclude=demo255.excluded,report=target/agent-report.json \
+  -cp target/test-classes demo255.AgentDemoMain
+cat target/agent-report.json   # 只含 demo255/AgentDemoMain 的方法，无 excluded 包条目
+```

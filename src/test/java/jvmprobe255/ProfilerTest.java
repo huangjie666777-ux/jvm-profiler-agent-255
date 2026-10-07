@@ -212,7 +212,10 @@ class ProfilerTest {
                 () -> profiler.transform(interfaceBytes, getClass().getClassLoader()));
 
         assertThrows(IllegalArgumentException.class,
-                () -> profiler.transform(new byte[]{1, 2, 3}, getClass().getClassLoader()));
+               () -> profiler.transform(new byte[]{1, 2, 3}, getClass().getClassLoader()));
+        assertThrows(IllegalArgumentException.class,
+                () -> profiler.transform(new byte[]{0x01, 0x02, 0x03, 0x04, 0x05},
+                        getClass().getClassLoader()), "wrong magic must be rejected");
     }
 
     @Test

@@ -35,6 +35,13 @@ public final class BytecodeTransformer {
         if (classBytes == null || classBytes.length == 0) {
             throw new IllegalArgumentException("null or empty class bytes");
         }
+        if (classBytes.length < 4
+                || (classBytes[0] & 0xFF) != 0xCA
+                || (classBytes[1] & 0xFF) != 0xFE
+                || (classBytes[2] & 0xFF) != 0xBA
+                || (classBytes[3] & 0xFF) != 0xBE) {
+            throw new IllegalArgumentException("invalid class file: bad magic number");
+        }
         ClassReader reader;
         ClassNode clazz = new ClassNode(ASM_API);
         try {

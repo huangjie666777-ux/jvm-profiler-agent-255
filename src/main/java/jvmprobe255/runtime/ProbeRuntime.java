@@ -27,7 +27,12 @@ public final class ProbeRuntime {
     private static final ConcurrentHashMap<Long, Stack> STACKS = new ConcurrentHashMap<>();
     /** Number of in-flight calls across all threads. */
     private static final AtomicLong IN_FLIGHT = new AtomicLong();
-    /** Serializes structural registry changes (cell creation/clear) against snapshots. */
+    /**
+     * Single protocol lock for enter-publish, exit-settlement, snapshot and clear:
+     * every one of them takes this lock, so a snapshot is a consistent point in
+     * time, a clear observing zero in-flight calls can never be followed by a
+     * late settlement, and a successful clear never mixes in stale counts.
+     */
     private static final ReentrantLock STRUCTURE_LOCK = new ReentrantLock();
 
     private static final class Stack {
@@ -51,8 +56,14 @@ public final class ProbeRuntime {
             long token = TOKENS.getAndIncrement();
             long start = System.nanoTime();
             // Publish the frame last; any failure before this point changed no stack.
-            IN_FLIGHT.incrementAndGet();
-            stack.top = new Frame(cell, start, stack.top);
+            // The in-flight increment and the frame publish are atomic w.r.t. clear.
+            STRUCTURE_LOCK.lock();
+            try {
+                IN_FLIGHT.incrementAndGet();
+                stack.top = new Frame(cell, start, stack.top);
+            } finally {
+                STRUCTURE_LOCK.unlock();
+            }
             return token;
         } catch (Throwable t) {
             return 0L;
@@ -90,7 +101,6 @@ public final class ProbeRuntime {
         if (frame.parent == null) {
             STACKS.remove(threadId);
         }
-        IN_FLIGHT.decrementAndGet();
 
         long inclusive = System.nanoTime() - frame.startNanos;
         if (inclusive < 0L) {
@@ -107,17 +117,26 @@ public final class ProbeRuntime {
             frame.parent.childInclusiveNanos += inclusive;
         }
 
-        StatsCell cell = frame.cell;
-        synchronized (cell) {
-            cell.completedCount++;
-            if (exceptional) {
-                cell.exceptionCount++;
+        // Settlement and the in-flight decrement commit together under the same
+        // lock as snapshot/clear: once clear observes zero in-flight calls, no
+        // unsettled frame can still add counts afterwards.
+        STRUCTURE_LOCK.lock();
+        try {
+            StatsCell cell = frame.cell;
+            synchronized (cell) {
+                cell.completedCount++;
+                if (exceptional) {
+                    cell.exceptionCount++;
+                }
+                cell.totalInclusiveNanos += inclusive;
+                cell.totalSelfNanos += self;
+                if (inclusive > cell.maxInclusiveNanos) {
+                    cell.maxInclusiveNanos = inclusive;
+                }
             }
-            cell.totalInclusiveNanos += inclusive;
-            cell.totalSelfNanos += self;
-            if (inclusive > cell.maxInclusiveNanos) {
-                cell.maxInclusiveNanos = inclusive;
-            }
+            IN_FLIGHT.decrementAndGet();
+        } finally {
+            STRUCTURE_LOCK.unlock();
         }
     }
 
